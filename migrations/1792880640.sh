@@ -33,8 +33,9 @@ for port in "$pci_devices"/*; do
   break
 done
 
-# Replace only the line Omarchy wrote there; any other USB4 drop-in is the
-# administrator's choice, so leave it and the boot image alone.
+# Rewrite the drop-in only while it holds the generic line Omarchy wrote, or
+# when there is none; any other USB4 drop-in is the administrator's choice, so
+# leave it and the boot image alone.
 if [[ ! -f $dropin ]] || grep -qxF "$generic" "$dropin"; then
   sudo install -Dm644 /dev/stdin "$dropin" <<'EOF'
 # N1x: keep the USB4 host routers powered and leave room for docks behind them;
