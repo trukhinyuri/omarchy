@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# ASUS ProArt P16 H7607BA: omarchy refresh pacman has just replaced
+# /etc/pacman.conf with the channel template, which drops the hold
+# install/hardware/pacman.sh puts on this laptop's fork builds, and runs
+# pacman -Syyuu next, which would downgrade them to upstream's. Put the hold
+# back. Installed by install/user/hardware/asus/hold-asus-proart-p16-fork-builds.sh.
+
+hold='IgnorePkg = linux-omarchy linux-omarchy-headers omarchy-dev omarchy-settings-dev'
+
+if omarchy-hw-match "H7607BA" && ! grep -qxF "$hold" /etc/pacman.conf; then
+  sudo sed -i "/^\[options\]/a $hold" /etc/pacman.conf
+fi
