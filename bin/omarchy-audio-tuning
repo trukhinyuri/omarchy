@@ -151,6 +151,21 @@ tuning_downstream_sink() {
   omarchy-audio-output-sink "$sink_name" 2>/dev/null
 }
 
+# A tuning that drives more than one physical sink (a 2-way speaker system, whose
+# tweeters are a second sink) plays into a node of its own that splits the
+# channels, named by output_node in tuning.conf. That node is internal, so the
+# PulseAudio view cannot follow the output through it; check that it exists
+# instead, and that each physical sink the graph names is still there.
+tuning_output_linked() {
+  if [[ -n ${output_node:-} ]]; then
+    pw-cli ls Node 2>/dev/null | grep -qF "node.name = \"$output_node\"" &&
+      [[ -n "$(sink_matching "$sink_pattern")" ]] &&
+      [[ -z ${companion_sink_pattern:-} || -n "$(sink_matching "$companion_sink_pattern")" ]]
+  else
+    [[ "$(tuning_downstream_sink)" == "$speaker_sink" ]]
+  fi
+}
+
 easyeffects_running() {
   pactl list sinks short 2>/dev/null | awk '{print $2}' | grep -x easyeffects_sink >/dev/null ||
     pgrep -u "$(id -u)" -x easyeffects >/dev/null 2>&1 ||
@@ -252,7 +267,7 @@ case "$action" in
       exit 0
     }
 
-    unset description sink_pattern
+    unset description sink_pattern companion_sink_pattern output_node
     # shellcheck disable=SC1090
     source "$selected/tuning.conf"
 
@@ -268,6 +283,23 @@ case "$action" in
       echo "  omarchy audio tuning on" >&2
       exit 1
     }
+
+    # A tuning may feed a second physical sink, such as a 2-way speaker system's
+    # tweeters, substituted for @COMPANION_SINK@.
+    companion_sink=""
+    if [[ -n ${companion_sink_pattern:-} ]]; then
+      for _ in {1..20}; do
+        companion_sink="$(sink_matching "$companion_sink_pattern")"
+        [[ -n $companion_sink ]] && break
+        sleep 0.5
+      done
+      [[ -n $companion_sink ]] || {
+        echo "A tuning applies to this laptop but no sink matching" >&2
+        echo "$companion_sink_pattern is present. Re-run after login:" >&2
+        echo "  omarchy audio tuning on" >&2
+        exit 1
+      }
+    fi
 
     if easyeffects_running; then
       cat >&2 <<'EOF'
@@ -288,7 +320,8 @@ EOF
 
     rendered="$(mktemp)"
     trap 'rm -f "$rendered"' EXIT
-    sed "s|@SPEAKER_SINK@|$speaker_sink|g" "$selected/filter-chain.conf" >"$rendered"
+    sed -e "s|@SPEAKER_SINK@|$speaker_sink|g" -e "s|@COMPANION_SINK@|$companion_sink|g" \
+      "$selected/filter-chain.conf" >"$rendered"
 
     # Everything that makes the tuning current has to match, not just the graph:
     # an active-but-disabled service disappears at next login, and a stale unit
@@ -298,7 +331,7 @@ EOF
       [[ -r $unit ]] && cmp -s "$unit_source" "$unit" &&
       systemctl --user is-active --quiet "$unit_name" 2>/dev/null &&
       systemctl --user is-enabled --quiet "$unit_name" 2>/dev/null &&
-      [[ "$(tuning_downstream_sink)" == "$speaker_sink" ]]; then
+      tuning_output_linked; then
       echo "Speaker tuning already current: $description"
       exit 0
     fi
@@ -329,11 +362,15 @@ EOF
 
     # Confirm the output really landed on the sink this tuning was measured for.
     for _ in {1..20}; do
-      [[ "$(tuning_downstream_sink)" == "$speaker_sink" ]] && break
+      tuning_output_linked && break
       sleep 0.25
     done
-    downstream="$(tuning_downstream_sink)"
-    if [[ $downstream != "$speaker_sink" ]]; then
+    if ! tuning_output_linked; then
+      if [[ -n ${output_node:-} ]]; then
+        downstream="nothing named $output_node"
+      else
+        downstream="$(tuning_downstream_sink)"
+      fi
       systemctl --user disable --now "$unit_name" >/dev/null 2>&1
       rm -f "$fragment" "$host_config" "$unit"
       systemctl --user daemon-reload >/dev/null 2>&1

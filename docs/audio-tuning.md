@@ -84,6 +84,8 @@ drivers can sound worse than none and can stress them. When a tuning covers a mo
 it was not measured on, say so in `tuning.conf` — the provenance fields are there to
 keep that distinction visible rather than implied.
 
+A speaker system with two amplifier paths (woofers on one sink, tweeters on another, as on the ASUS ProArt P16) declares the second sink with `companion_sink_pattern`; `on` waits for it and substitutes it for `@COMPANION_SINK@`. Such a graph plays its channels into a combine-stream node of its own, which splits them onto the two sinks. Name that node in `output_node`: it is internal (`Audio/Sink/Internal`), so it is never offered as an output, and `on` checks that it exists instead of following the output to one physical sink. Keep its name from starting with `omarchy_speaker_tuning`, or the volume keys would follow its streams to one of the two sinks instead of staying on the tuning sink. See `default/audio/tunings/asus-proart-p16-n1x/`.
+
 Two hard requirements:
 
 - **End in a limiter.** Peaks must stay under 0 dBFS with headroom.
