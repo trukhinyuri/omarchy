@@ -1,0 +1,249 @@
+#!/bin/bash
+
+# DRAFT bring-up aid for the ASUS ProArt P16 (H7607BA) tweeter path, for the
+# on-device validation described in the bring-up plan. Not part of the tuning and
+# not meant to ship.
+#
+# The tweeters are on the CS42L43's own amplifier, which has no speaker
+# protection in the register mode Linux drives it in, so every command here:
+#   - refuses to run on anything but an H7607BA with the MT8901 card;
+#   - routes nothing to that amplifier until the codec EQ has been programmed
+#     with ASUS's 3 kHz Linkwitz-Riley high-pass AND an electrical loopback has
+#     shown it attenuating 1 kHz by at least 30 dB against 6 kHz;
+#   - plays only tones of 2 kHz and up, at -20 dBFS or less, at a codec volume
+#     of 0 dB or less;
+#   - puts the amplifier back to unrouted and muted on exit, however it exits.
+#
+# It needs the sound card to itself, so it stops PipeWire for its duration and
+# starts it again afterwards.
+#
+#   tweeter-bringup state                  controls, card components, amp firmware
+#   tweeter-bringup safe                   unroute and mute the CS42L43 amplifier
+#   tweeter-bringup loopback               T1: EQ response, electrically, no speaker
+#   tweeter-bringup tone <Hz> [dBFS] [vol] [left|right|both]
+#                                          T2: a tone through the EQ into the tweeters
+#                                          (vol = 'cs42l43 Speaker Digital Volume',
+#                                           0..128, 128 = 0 dB; default 88 = -20 dB)
+
+set -uo pipefail
+
+card=mt8901soundwire
+pcm_out="plughw:CARD=$card,DEV=1"   # DL1 -> PDI5 -> codec DP5 (the jack's stream)
+pcm_in="plughw:CARD=$card,DEV=8"    # UL1 <- PDI13 <- host DP7 <- codec DP1
+work=""
+
+# ASUS's codec configuration for this laptop high-passes the speaker feed with
+# two identical Butterworth sections, 3 kHz, Q 0.7071, at 48 kHz, after a
+# -0.75 dB gain stage. Signed Q2.30, (b0, b1, -a1, -a2, b2) per band, LE bytes.
+eq_hpf_3k="32,166,180,58,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,240,115,48,16,31,24,159,177,83,18,93,208,145,66,219,120,240,115,48,120,240,115,48,16,31,24,159,177,83,18,93,208,145,66,219,120,240,115,48"
+
+die() {
+  echo "tweeter-bringup: $*" >&2
+  exit 1
+}
+
+cset() {
+  amixer -q -c "$card" cset "name=$1" "$2" || die "could not set $1 = $2"
+}
+
+cget() {
+  amixer -c "$card" cget "name=$1" 2>/dev/null | sed -n 's/^  : values=//p'
+}
+
+require_machine() {
+  grep -q "H7607BA" /sys/class/dmi/id/product_name 2>/dev/null ||
+    die "this is not an ASUS ProArt P16 H7607BA"
+  amixer -c "$card" info >/dev/null 2>&1 || die "no $card sound card"
+  amixer -c "$card" cget "name=cs42l43 EQ Coefficients" >/dev/null 2>&1 ||
+    die "the CS42L43 EQ control is missing"
+  command -v ffmpeg >/dev/null || die "ffmpeg is needed to make and measure tones"
+}
+
+safe() {
+  amixer -q -c "$card" cset "name=cs42l43 Speaker Digital Switch" off,off
+  amixer -q -c "$card" cset "name=cs42l43 Speaker L Input 1" None
+  amixer -q -c "$card" cset "name=cs42l43 Speaker R Input 1" None
+}
+
+pipewire_stopped=0
+tuning_was_active=0
+stop_pipewire() {
+  systemctl --user is-active --quiet omarchy-speaker-tuning.service 2>/dev/null && tuning_was_active=1
+  systemctl --user stop omarchy-speaker-tuning.service pipewire-pulse.socket pipewire.socket \
+    pipewire-pulse.service wireplumber.service pipewire.service 2>/dev/null
+  pipewire_stopped=1
+}
+
+restore() {
+  safe
+  if ((pipewire_stopped)); then
+    # Give the microphones and the jack their UCM routing back.
+    amixer -q -c "$card" cset "name=cs42l43 DP1TX1 Input" "Decimator 3"
+    amixer -q -c "$card" cset "name=cs42l43 DP1TX2 Input" "Decimator 4"
+    amixer -q -c "$card" cset "name=cs42l43 EQ1 Input 1" None
+    amixer -q -c "$card" cset "name=cs42l43 EQ2 Input 1" None
+    amixer -q -c "$card" cset "name=cs42l43 Headphone L Input 1" DP5RX1
+    amixer -q -c "$card" cset "name=cs42l43 Headphone R Input 1" DP5RX2
+    systemctl --user start pipewire.socket pipewire-pulse.socket pipewire.service \
+      pipewire-pulse.service wireplumber.service 2>/dev/null
+    ((tuning_was_active)) && systemctl --user start omarchy-speaker-tuning.service 2>/dev/null
+  fi
+  [[ -n $work ]] && rm -rf "$work"
+}
+
+# The HiFi verb's routing for DL1 playback and UL1 capture, as the UCM profile
+# sets it, with nothing sent to the headphone amplifier.
+route_streams() {
+  cset "O156 I034 Switch" 1
+  cset "O157 I035 Switch" 1
+  cset "PDI5 Demux" DP5
+  cset "PDI13 Mux" DP7
+  cset "O020 I180 Switch" 1
+  cset "O021 I181 Switch" 1
+  cset "cs42l43 Headphone L Input 1" None
+  cset "cs42l43 Headphone R Input 1" None
+}
+
+load_eq() {
+  cset "cs42l43 EQ Coefficients" "$eq_hpf_3k"
+  [[ "$(cget 'cs42l43 EQ Coefficients' | tr -d ' ')" == *"0x20,0xa6,0xb4,0x3a"* ||
+    "$(cget 'cs42l43 EQ Coefficients')" == *"32,166,180,58"* ]] ||
+    echo "note: could not read the coefficients back to check them" >&2
+  cset "cs42l43 EQ1 Input 1" DP5RX1
+  cset "cs42l43 EQ2 Input 1" DP5RX2
+  cset "cs42l43 EQ1 Input 1 Volume" 32
+  cset "cs42l43 EQ2 Input 1 Volume" 32
+}
+
+make_tone() { # <Hz> <dBFS> <left|right|both> <seconds> <out.wav>
+  local pan="c0=c0|c1=c0"
+  [[ $3 == left ]] && pan="c0=c0|c1=0*c0"
+  [[ $3 == right ]] && pan="c0=0*c0|c1=c0"
+  # A full-scale sine scaled to the requested peak level (lavfi's sine= source
+  # is fixed at 1/8 of full scale, so it would be 18 dB quieter than asked).
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "aevalsrc=sin(2*PI*$1*t):s=48000:d=$4" \
+    -af "volume=${2}dB,afade=t=in:d=0.05,afade=t=out:st=$(($4 - 1)).9:d=0.1,pan=stereo|$pan" \
+    -ac 2 -ar 48000 -c:a pcm_s16le "$5"
+}
+
+rms_db() { # <wav> -> RMS level of its middle second
+  ffmpeg -hide_banner -nostats -i "$1" -af "atrim=start=1:duration=1,astats=metadata=0" -f null - 2>&1 |
+    awk '/Overall/ {o=1} o && /RMS level dB/ {print $NF; exit}'
+}
+
+# Play a tone on DL1 and record DP1 (EQ output) at the same time.
+loop_level() { # <Hz> -> dBFS at the EQ output
+  make_tone "$1" -20 both 3 "$work/t.wav"
+  arecord -q -D "$pcm_in" -f S16_LE -c 2 -r 48000 -d 3 "$work/r.wav" &
+  local rec=$!
+  sleep 0.2
+  aplay -q -D "$pcm_out" "$work/t.wav"
+  wait "$rec"
+  rms_db "$work/r.wav"
+}
+
+loopback() {
+  cset "cs42l43 DP1TX1 Input" EQ1
+  cset "cs42l43 DP1TX2 Input" EQ2
+  local f lvl ref="" out=()
+  echo "EQ loopback (tones at -20 dBFS, relative to 10 kHz; LR4 3 kHz expects"
+  echo "  1k -38.6, 2k -15.8, 3k -6.0, 4k -2.3, 6k -0.4):"
+  for f in 10000 1000 2000 3000 4000 6000; do
+    lvl="$(loop_level "$f")"
+    [[ -n $lvl && $lvl != "-inf" ]] || die "no signal came back at $f Hz: check the routing (state)"
+    [[ -z $ref ]] && ref="$lvl"
+    out+=("$f $lvl")
+    printf '  %5d Hz  %7.1f dB\n' "$f" "$(awk -v a="$lvl" -v b="$ref" 'BEGIN {print a - b}')"
+  done
+  cset "cs42l43 DP1TX1 Input" "Decimator 3"
+  cset "cs42l43 DP1TX2 Input" "Decimator 4"
+  local l1k l6k
+  l1k="$(printf '%s\n' "${out[@]}" | awk '$1 == 1000 {print $2}')"
+  l6k="$(printf '%s\n' "${out[@]}" | awk '$1 == 6000 {print $2}')"
+  awk -v a="$l1k" -v b="$l6k" 'BEGIN {exit !(b - a >= 30)}'
+}
+
+check_tone_args() { # <Hz> [dBFS] [vol] [side]
+  local hz="${1:-}" db="${2:--30}" vol="${3:-88}" side="${4:-both}"
+  [[ $hz =~ ^[0-9]+$ ]] && ((hz >= 2000 && hz <= 20000)) || die "tone frequency must be 2000-20000 Hz"
+  [[ $db =~ ^-[0-9]+([.][0-9]+)?$ ]] && awk -v d="$db" 'BEGIN {exit !(d <= -20)}' ||
+    die "tone level must be -20 dBFS or lower"
+  [[ $vol =~ ^[0-9]+$ ]] && ((vol <= 128)) || die "codec volume must be 0-128 (128 = 0 dB)"
+  [[ $side == left || $side == right || $side == both ]] || die "side is left, right or both"
+}
+
+tone() { # <Hz> [dBFS] [vol] [side], already checked
+  local hz="$1" db="${2:--30}" vol="${3:-88}" side="${4:-both}"
+
+  echo "Checking the EQ high-pass electrically before routing anything to the tweeters..."
+  loopback || die "the EQ is not high-passing as designed; nothing was routed to the tweeters"
+
+  cset "cs42l43 Speaker L Input 1 Volume" 32
+  cset "cs42l43 Speaker R Input 1 Volume" 32
+  cset "cs42l43 Speaker Digital Volume" "$vol,$vol"
+  cset "cs42l43 Speaker L Input 1" EQ1
+  cset "cs42l43 Speaker R Input 1" EQ2
+  cset "cs42l43 Speaker Digital Switch" on,on
+  echo "Playing $hz Hz at $db dBFS, codec volume $vol ($(awk -v v="$vol" 'BEGIN {print -64 + v / 2}') dB), $side, 3 s"
+  make_tone "$hz" "$db" "$side" 3 "$work/t.wav"
+  aplay -q -D "$pcm_out" "$work/t.wav"
+  safe
+  echo "Tweeters unrouted and muted again."
+}
+
+state() {
+  amixer -c "$card" info | sed -n 's/^[[:space:]]*Components[[:space:]]*:[[:space:]]*/Components: /p'
+  local c
+  for c in "cs42l43 Speaker Digital Switch" "cs42l43 Speaker Digital Volume" \
+    "cs42l43 Speaker L Input 1" "cs42l43 Speaker R Input 1" \
+    "cs42l43 Speaker L Input 1 Volume" "cs42l43 Speaker R Input 1 Volume" \
+    "cs42l43 EQ1 Input 1" "cs42l43 EQ2 Input 1" "cs42l43 EQ Switch" \
+    "cs42l43 DP1TX1 Input" "cs42l43 DP1TX2 Input" \
+    "cs42l43 Headphone L Input 1" "cs42l43 Headphone R Input 1" \
+    "AMP1 Speaker Switch" "AMP2 Speaker Switch" "AMP1 Speaker Volume" "AMP2 Speaker Volume" \
+    "Speaker Switch" "Headphone Switch"; do
+    printf '%-36s %s\n' "$c" "$(cget "$c")"
+  done
+  printf '%-36s %s\n' "Headphone Jack" "$(amixer -c "$card" cget iface=CARD,name='Headphone Jack' 2>/dev/null | sed -n 's/^  : values=//p')"
+  echo "Amplifier firmware:"
+  journalctl -k -b --no-pager 2>/dev/null | grep -E "cs35l56.*(10431484|Calibration|FIRMWARE|wmfw|\.bin)" | tail -6
+}
+
+action="${1:-}"
+[[ -n $action ]] && shift
+case "$action" in
+  state)
+    require_machine
+    state
+    ;;
+  safe)
+    require_machine
+    safe
+    echo "CS42L43 amplifier unrouted and muted."
+    ;;
+  loopback)
+    require_machine
+    work="$(mktemp -d)"
+    trap restore EXIT
+    safe
+    stop_pipewire
+    route_streams
+    load_eq
+    if loopback; then echo "PASS: the EQ high-passes as designed."; else die "FAIL: 1 kHz is not 30 dB below 6 kHz"; fi
+    ;;
+  tone)
+    require_machine
+    check_tone_args "$@"
+    work="$(mktemp -d)"
+    trap restore EXIT
+    safe
+    stop_pipewire
+    route_streams
+    load_eq
+    tone "$@"
+    ;;
+  *)
+    awk 'NR > 2 && /^#/ {sub(/^# ?/, ""); print; next} NR > 2 {exit}' "$0"
+    exit 2
+    ;;
+esac
