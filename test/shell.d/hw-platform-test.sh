@@ -178,7 +178,8 @@ fi
 pass "contradictory identity fails with an explanation"
 
 # The NVIDIA N1x boots with ACPI and no device tree: its MediaTek I2C
-# controllers (ACPI NVDA0200) or its GPU (PCI 10de:2e06) name it, either alone.
+# controllers (ACPI NVDA0200) or its GPU (PCI 10de:2e06, or 10de:2e03 on the
+# ASUS ProArt P16) name it, either alone.
 n1x_acpi() { mkdir -p "$test_tmp/cases/$1/sys/bus/acpi/devices/NVDA0200:00" "$test_tmp/cases/$1/proc"; }
 n1x_pci() {
   local device="$test_tmp/cases/$1/sys/bus/pci/devices/000${3:-1}:00:00.0"
@@ -190,10 +191,17 @@ n1x_acpi n1x-acpi
 n1x_pci n1x-gpu
 n1x_acpi n1x-both
 n1x_pci n1x-both
-n1x_pci other-nvidia 0x2e03
+# The ProArt P16 H7607BA: GPU 10de:2e03 on PCI segment 15, as Windows reports it.
+n1x_pci n1x-p16-gpu 0x2e03 f
+n1x_acpi n1x-p16
+n1x_pci n1x-p16 0x2e03 f
+n1x_pci other-nvidia 0x2684
 expect n1x-acpi aarch64 aarch64-n1x "the N1x's ACPI I2C controllers name it"
 expect n1x-gpu aarch64 aarch64-n1x "the N1x's GPU names it"
 expect n1x-both aarch64 aarch64-n1x "both N1x signatures agree"
+expect n1x-p16-gpu aarch64 aarch64-n1x "the ProArt P16's 6144-core N1X GPU names it"
+expect n1x-p16 aarch64 aarch64-n1x "the ProArt P16's I2C controllers and GPU agree"
+expect_contradiction n1x-p16-gpu x86_64 "a ProArt P16 N1X GPU on an x86 CPU fails"
 expect other-nvidia aarch64 aarch64 "another NVIDIA GPU is not an N1x"
 expect_contradiction n1x-acpi x86_64 "an N1x on an x86 CPU fails"
 n1x_acpi n1x-apple

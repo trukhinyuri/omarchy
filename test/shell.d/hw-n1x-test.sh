@@ -59,6 +59,14 @@ assert_succeeds hw_n1x "MediaTek I2C controllers (NVDA0200) identify N1x"
 write_sysfs "PNP0C0D:00" "0x10de:0x2e06"
 assert_succeeds hw_n1x "GB20B GPU 10de:2e06 identifies N1x"
 
+# ASUS ProArt P16 H7607BA: seven NVDA0200 controllers, FF-A EC, GPU 10de:2e03
+# behind an NVIDIA root port.
+write_sysfs "NVDA0200:00 NVDA0200:06 ARML0002:00" "0x10de:0x22d1 0x10de:0x2e03"
+assert_succeeds hw_n1x "the ProArt P16 (NVDA0200, GPU 10de:2e03) is N1x"
+
+write_sysfs "PNP0C0D:00" "0x10de:0x22d1 0x10de:0x2e03"
+assert_succeeds hw_n1x "the ProArt P16's 6144-core GPU 10de:2e03 alone identifies N1x"
+
 write_sysfs "PNP0C0D:00 NVDA0301:00" "0x10de:0x2e12"
 assert_fails hw_n1x "a Spark (2e12, Tegra I2C ids) is not N1x"
 
