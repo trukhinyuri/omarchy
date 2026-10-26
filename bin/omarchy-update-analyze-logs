@@ -10,12 +10,19 @@ update_log="${OMARCHY_UPDATE_LOG:-/tmp/omarchy-update.log}"
 # from preset" before it skips a preset that has no kernel or output. Warn only
 # for an explicit mkinitcpio error, or a generation that started and did not
 # succeed.
+#
+# limine-mkinitcpio-hook builds each kernel's image without a preset, so the
+# preset count never applies there, and it keeps the old image when mkinitcpio
+# fails. Its "mkinitcpio failed for kernel" line is then the only report when
+# mkinitcpio stopped on a bare error, such as a missing UEFI stub after the
+# initramfs had built.
 initramfs_failed() {
   local attempts skips successes
 
   [[ -f $update_log ]] || return 1
 
-  if grep -q -e "Failed to load preset" \
+  if grep -q -e "mkinitcpio failed for kernel" \
+    -e "Failed to load preset" \
     -e "Initcpio image generation FAILED" \
     -e "Early uncompressed CPIO image generation FAILED" \
     -e "Unified kernel image generation FAILED" \

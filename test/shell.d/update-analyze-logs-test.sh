@@ -96,3 +96,15 @@ write_log incomplete <<'EOF'
 ==> WARNING: errors were encountered during the build. The image may not be complete.
 EOF
 assert_warns incomplete "an incomplete initramfs image is a failure"
+
+write_log limine-skipped-kernel <<'EOF'
+(5/6) Updating linux initcpios...
+Building UKI for linux-omarchy (7.2.8-24-omarchy)
+==> Starting build: '7.2.8-24-omarchy'
+==> Initcpio image generation successful
+==> Creating unified kernel image: '/tmp/limine-mkinitcpio.oqd6Ca/linux-omarchy.efi'
+==> ERROR: UEFI stub not found: '/usr/lib/systemd/boot/efi/linuxaa64.efi.stub'
+==> ERROR: UEFI stub not found: '/usr/lib/gummiboot/linuxaa64.efi.stub'
+ERROR: mkinitcpio failed for kernel 7.2.8-24-omarchy, skipping.
+EOF
+assert_warns limine-skipped-kernel "a kernel the Limine hook skips is a failure even when its initramfs built"
